@@ -47,15 +47,8 @@ options(dplyr.summarise.inform =FALSE)
 
 Read in and annotate trees
 ```{r echo=TRUE}
-PDD=readRDS("./PDD_tree_ml_only.rds")
-mice=names(PDD)[1:6]
-trees=lapply(mice,function(mouse)
-  annotate_celltype(
-    drop.tip(PDD[[paste0(mouse,"_combined_HSC_MPP")]],"zeros"),
-    mouse)
-  )
-names(trees)=mice
-trees=lapply(trees,function(tree){tree$edge.length=round(tree$edge.length);tree})
+trees=readRDS("data/PDD_with_hsc_mpp_annot.RDS")
+mice=names(trees)
 ```
 ### Perform inferences
 ```{r}
