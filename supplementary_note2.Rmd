@@ -1,0 +1,429 @@
+---
+title: "Supplementary Note 2 Workbook"
+output: html_document
+date: '2023-10-31'
+always_allow_html: true
+author: 'Nick Williams'
+---
+
+### Summary
+
+Notebook supporting results detailed in supplementary note 2
+
+### Load the libraries and dependencies
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE,dev = c('png', 'pdf'),fig.path="reduxfigures/fig_")
+library <- function (packages) {
+   suppressWarnings(suppressMessages(lapply(packages, base::library, character.only = TRUE)))
+   return(invisible())
+}
+require <- function (packages) {
+   suppressWarnings(suppressMessages(lapply(packages, base::require, character.only = TRUE)))
+   return(invisible())
+}
+### Complete list of explicit package dependencies
+library("ggplot2")
+library("dplyr")
+library("tidyr")
+library("ggpubr")
+library("phytools")
+library("ggbeeswarm")
+library("kableExtra")
+library("flextable")
+library("grid")
+require("Matrix")
+require("matrixcalc")
+require("matrixStats")
+require("parallel")
+require("bbmle")
+require("rstan")
+require("RColorBrewer")
+require("scales")
+require("tidyverse")
+source("scripts/plot_tree_minimal.R")
+source("scripts/mpphsc_stan.R")
+options(dplyr.summarise.inform =FALSE)
+```
+
+Read in and annotate trees
+```{r echo=TRUE}
+PDD=readRDS("./PDD_tree_ml_only.rds")
+mice=names(PDD)[1:6]
+trees=lapply(mice,function(mouse)
+  annotate_celltype(
+    drop.tip(PDD[[paste0(mouse,"_combined_HSC_MPP")]],"zeros"),
+    mouse)
+  )
+names(trees)=mice
+trees=lapply(trees,function(tree){tree$edge.length=round(tree$edge.length);tree})
+```
+### Perform inferences
+```{r}
+ncores=4
+NITER=1:30
+set.seed(1234567)
+RUN_FROM_SCRATCH=FALSE ## Set to TRUE to run from scratch
+STANITER=10000
+if(RUN_FROM_SCRATCH){
+  ## Full model fits
+  all.mice.fit=mclapply(NITER,function(x) infer_all_trees_FULL_RND(trees,mt.start = 10,mt.end=Inf),mc.cores=ncores)
+  saveRDS(all.mice.fit,"cache.all.mice.fit.RDS")
+  per.mouse.fit=lapply(1:6,function(k) {
+    cat("processing ",mice[k],"\n");mclapply(NITER,function(x) infer_all_trees_FULL_RND(trees[k],mt.start = 10,mt.end=Inf),mc.cores=ncores)}
+  )
+  names(per.mouse.fit)=mice
+  saveRDS(per.mouse.fit,"cache.per.mouse.fit.RDS")
+  mle.old.mice=mclapply(NITER,function(x) infer_all_trees_FULL_RND(trees[1:3],mt.start = 10,mt.end=Inf),mc.cores=ncores)
+  saveRDS(mle.old.mice,"cache.mle.old.mice.fit.RDS")
+  mle.young.mice=mclapply(NITER,function(x) infer_all_trees_FULL_RND(trees[4:6],mt.start = 10,mt.end=Inf),mc.cores=ncores)
+  saveRDS(mle.young.mice,"cache.mle.young.mice.fit.RDS")
+  per.agegroup.fit=list(old=mle.old.mice,young=mle.young.mice)
+  
+  ## Stan estimates
+  stan.old.mice=run.upward.discrete.3mice.hmt(trees[1:3],niter = STANITER)
+  saveRDS(stan.old.mice,"cache.stan.old.mice.fit.RDS")
+  stan.young.mice=run.upward.discrete.3mice.hmt(trees[4:6],niter = STANITER)
+  saveRDS(stan.young.mice,"cache.stan.young.mice.fit.RDS")
+  
+  ## HSC First 
+  set.seed(1234545)
+  old.hscfirst=mclapply(1:30,function(x) infer_all_trees_FULL_RND_FIX_A(trees[1:3],a=1,mt.start = 10,mt.end=Inf),mc.cores=ncores)
+  young.hscfirst=mclapply(1:30,function(x) infer_all_trees_FULL_RND_FIX_A(trees[4:6],a=1,mt.start = 10,mt.end=Inf),mc.cores=ncores)
+  hsc.first=list(old=old.hscfirst,
+                 young=young.hscfirst
+  )
+  saveRDS(hsc.first,"cache.hscfirst.fit.RDS")
+}else{
+  FIRSTSUBMISSION=FALSE
+  if(FIRSTSUBMISSION){
+    all.mice.fit=readRDS("all.mice.fit.LL.RDS")
+    per.mouse.fit=readRDS("per.mouse.fit.LL.RDS")
+    per.agegroup.fit=readRDS("per.agegroup.fit.RDS")
+    mle.old.mice=readRDS("old.mice.fit.RDS")
+    mle.young.mice=readRDS("young.mice.fit.RDS")
+    stan.old.mice=readRDS("fit.old.stan.RDS")
+    stan.young.mice=readRDS("fit.young.stan.RDS")
+    hsc.first=readRDS("per.agegroup.fit.hscfirst.RDS")
+  }else{
+    all.mice.fit=readRDS("cache.all.mice.fit.RDS")
+    per.mouse.fit=readRDS("cache.per.mouse.fit.RDS")
+    mle.old.mice=readRDS("cache.mle.old.mice.fit.RDS")
+    mle.young.mice=readRDS("cache.mle.young.mice.fit.RDS")
+    stan.old.mice=readRDS("cache.stan.old.mice.fit.RDS")
+    stan.young.mice=readRDS("cache.stan.young.mice.fit.RDS")
+    hsc.first=readRDS("cache.hscfirst.fit.RDS")
+    per.agegroup.fit=list(old=mle.old.mice,young=mle.young.mice)
+  }
+}
+```
+
+
+
+## A simple 3 state model for Murine Progenitor Ontegeny
+
+To formalise the above ideas in the context of a simple model for the ontogeny we consider the state of all cells prior to 10 mutations in molecular time as being in an embryonic precursor state (EMB) we then assume that in each unit molecular time there is a fixed probability of transitioning out of this embryonic state into either an HSC state, $p_{EMB->HSC}$, or an MPP state, $p_{EMB->MPP}$, furthermore we assume that there then a fixed probability of transitioning from an HSC to an MPP,  $p_{HSC->MPP}$, and from an MPP to an HSC , $p_{MPP->HSC}$, and thus the evolution of the cells down the tree is governed by a discrete time Markov chain process.  
+
+The likelihood of the observed tip cell types is calculated using a hidden Markov tree approach (see below).  Maximum likelihood estimates of the model parameters are then obtained by maximising the sum of the log-likelihoods across the mouse specific phylogenetic trees.  
+
+Note that here we implicitly assume that the sampling of MPP and HSC is approximately unbiased.  For all mice the MPPs and HSCs are approximately equally sampled and the phylodyn analysis suggest that the population dynamics of MPPs and HSCs are similar.   
+
+
+## The model fits best if we group the mice into "young" and "old"
+
+We fit the model on a per mouse, per age group and pan cohort.
+
+```{r results='hide',message=FALSE,warning=FALSE,echo=TRUE}
+pp=get_full_results(c(per.mouse.fit,list(cohort=all.mice.fit),per.agegroup.fit))
+```
+
+```{r paramplot, fig.width=12, fig.height=12,echo=TRUE}
+df=pp$longres  %>% pivot_wider(names_from = "TYPE") %>% filter(!is.na(lb)) %>% mutate(AGE=factor(AGE,c(mice,c("old","young","cohort"))))
+brk=c(1e-4,5e-4,0.001,0.005,0.01,0.05,0.1,0.5,1)
+ggplot(df,
+       aes(x=PARAM,y=ifelse(est<1e-4,1e-4,est),ymin=ifelse(lb<1e-4,1e-4,lb),ymax=ub,col=PARAM)) +
+  geom_point()+geom_errorbar()+facet_wrap(~AGE)+theme_bw()+
+  theme(axis.title.x=element_blank(),axis.text.x=element_blank(),axis.ticks.x=element_blank())+
+  ylab("Probability")+scale_y_log10(breaks=brk,labels=sprintf("%5.4f",brk),limits=c(0.0001,1))+
+  theme(panel.grid.minor = element_blank())
+```
+
+We observe that the per mouse inferences can be very noisy, so it is unsurprising that an anova analysis reveals that the best model is to group the samples into old and young mice.
+
+```{r echo=TRUE,comment=NA}
+DF=data.frame(num_degree_freedom=c(6*4,2*4,4),
+              logLikelihood=pp$wideres %>% filter(TYPE=="LL") %>% select(1:9) %>% as.matrix %>% (function(x){c(per_mouse=sum(x["LL",mice]),per_age_group=sum(x["LL",c("young","old")]),pan_cohort=x["LL","cohort"])}))
+DF$ID=rownames(DF)
+DF=DF[order(DF$num_degree_freedom),]
+DF=DF %>% mutate(AIC=2*num_degree_freedom-2*logLikelihood)
+DF$anova=""
+DF$ID=rownames(DF)
+for(i in 2:3){
+  DF$anova[i]=sprintf("%s vs %s: P=%4.3g",DF$ID[i],DF$ID[i-1],
+                      pchisq(2*(DF$logLikelihood[i]-DF$logLikelihood[i-1]),df =DF$num_degree_freedom[i]-DF$num_degree_freedom[i-1],lower.tail = FALSE)
+  )
+}
+FitFlextableToPage <- function(ft, pgwidth = 8){
+
+  ft_out <- ft %>% autofit()
+
+  ft_out <- width(ft_out, width = dim(ft_out)$widths*pgwidth /(flextable_dim(ft_out)$widths))
+  return(ft_out)
+}
+FitFlextableToPage(flextable(DF %>% dplyr::select(-ID) )  %>% colformat_double(digits = 1))
+```
+
+## MLE Results
+
+The above results were obtained using maximum likelihood estimation using the R package “bbmle”.  The maximisation was performed on logit transformed quantities: $p_{HSC->MPP}$, $p_{MPP->HSC}$, $p_{EMB->HSC}/(p_{EMB->HSC}+p_{EMB->MPP} )$  and $p_{EMB->HSC}+p_{EMB->MPP}$. In summary we obtained the following parameter estimates and logit scale standard error based confidence intervals:
+```{r echo=TRUE}
+tmp=pp$wideres %>% filter(!(PARAM %in% c("EMB->HSC","EMB->MPP","LL"))) %>% pivot_wider(names_from = TYPE,values_from = 1:9)
+tbl=tmp %>% mutate(Young=sprintf("%3.2g(%3.2g - %3.2g)",young_est,young_lb,young_ub),Old= sprintf("%3.2g(%3.2g - %3.2g)",old_est,old_lb,old_ub)) %>% select(PARAM,Young,Old) %>% column_to_rownames("PARAM") %>% t %>% as.data.frame() %>% rownames_to_column(var = "Group")
+
+tmp=pp$wideres %>% filter(PARAM %in% c("EMB->HSC","EMB->MPP")) %>% pivot_wider(names_from = TYPE,values_from = 1:9)
+extra=tmp %>% select(PARAM,"young_est","old_est") %>% rename(Young=young_est,Old=old_est) %>% filter(PARAM %in% c("EMB->MPP","EMB->HSC")) %>% column_to_rownames("PARAM") %>% t %>% as.data.frame() %>% rownames_to_column(var = "Group") 
+
+## Add in indirect estimates from EMB->HSC etc
+tbl=tbl %>% inner_join(extra,by="Group") %>% select(1,6,7,2,3,4,5)
+
+FitFlextableToPage(flextable(tbl )  %>% colformat_double(digits = 4))
+```
+
+### Stan based inferences
+
+To obtain alternative estimates with CIs of the model and also direct estimates of the CIs for $p_{EMB->HSC}$ and $p_{EMB->MPP}$ we implemented a Stan based Bayesian version of the model using the directly calculated likelihood as described above.   Uniform priors on the unit interval were assumed for $p_{EMB->HSC}/(p_{EMB->HSC}+p_{EMB->MPP} )$ and $p_{EMB->HSC}+p_{EMB->MPP}$ and uniform priors on the interval (0-0.5) were assumed for both  $p_{HSC->MPP}$  and $p_{MPP->HSC}$ . The model was run with four chains, each for 10,000 iterations. 
+
+```{r echo=TRUE}
+mle=rbind(
+  suppressWarnings(report_results_FULL(mle.young.mice)),
+  suppressWarnings(report_results_FULL(mle.old.mice))
+)
+mle=as.data.frame(mle) %>% mutate(group=c("Young","Aged")) %>% select("group",1:(dim(mle)[2]))
+tmp=summary(stan.young.mice)$summary
+stan.young=tmp[c("P_EMB_HSC","P_EMB_MPP","phscmpp","pmpphsc"),] %>% 
+  as.data.frame() %>% 
+  mutate(field=c("EMB->HSC","EMB->MPP","HSC->MPP","MPP->HSC"))
+stan.young=stan.young %>% select(field,"50%","2.5%","97.5%") %>% 
+  (function(x){colnames(x)[2:4]=c("Median","lb","ub");rownames(x)=x$field;x}) %>% 
+  mutate(res=sprintf("%3.2g(%3.2g - %3.2g)",Median,lb,ub)) %>% select(res) %>% t
+tmp=summary(stan.old.mice)$summary
+stan.old=tmp[c("P_EMB_HSC","P_EMB_MPP","phscmpp","pmpphsc"),] %>% 
+  as.data.frame() %>% 
+  mutate(field=c("EMB->HSC","EMB->MPP","HSC->MPP","MPP->HSC"))
+stan.old=stan.old %>% select(field,"50%","2.5%","97.5%") %>% 
+  (function(x){colnames(x)[2:4]=c("Median","lb","ub");rownames(x)=x$field;x}) %>% 
+  mutate(res=sprintf("%3.2g(%3.2g - %3.2g)",Median,lb,ub)) %>% select(res) %>% t
+STAN=rbind(stan.young,stan.old) %>% as.data.frame() %>% mutate(Group=c("Young","Aged")) %>% select(Group,1:4)
+FitFlextableToPage(flextable(STAN ))
+```
+
+The results are consistent between the MLE and STAN for the old mouse, but there is quite big difference for the young mouse for $p_{EMB->HSC}$ and $p_{EMB->MPP}$. However, examining the posterior distribution of the STAN estimates shows that the maximum likelihood estimates lie near the modes of the corresponding marginal posterior distributions. 
+
+```{r echo=TRUE}
+posterior=rstan::extract(stan.young.mice)##
+df=data.frame(P=c(posterior$P_EMB_HSC,posterior$P_EMB_MPP),
+              parameter=c(rep("p(EMB->HSC)",length(posterior$P_EMB_HSC)),
+                          rep("p(EMB->MPP)",length(posterior$P_EMB_MPP))
+                          )
+              )
+ggplot(data=df,aes(x=P,fill=parameter))+geom_density(alpha=0.2)+
+  geom_vline(aes(xintercept=tbl %>% filter(Group=="Young") %>% pull("EMB->HSC"),col="p(EMB->HSC)" ))+
+  geom_vline(aes(xintercept=tbl %>% filter(Group=="Young") %>% pull("EMB->MPP"),col="p(EMB->MPP)" ))+
+  theme_bw()+ 
+  scale_fill_discrete(name = "STAN Posterior") +
+  scale_color_discrete(name="MLE Estimates")+ggtitle("Comparing MLE and Stan results for Young mice")
+```
+
+## The Young and Aged mice apparently exhibit differing patterns of differentiation
+
+The data suggests that aged mice exhibit lots of independent transitions from the embryonic precursor state followed by relatively few transitions between HSC and MPP or vice versa. In contrast the data suggests that young animals exhibit a tendency towards HSC-First followed by lots of HSC->MPP transitions.   
+
+```{r echo=TRUE,results='hide',message=FALSE,warning=FALSE}
+rm=sapply(per.agegroup.fit,report_results)
+viterbis=list()
+changes=NULL
+model="Age Group Specific Model (Old)"
+mouse.specific.model.fit=list()
+cohort.param=report_results(all.mice.fit)
+### old mice
+rr=rm[,"old"]
+for(mouse in mice[1:3]){
+    tree=trees[[mouse]]
+    tree$edge.length=round(tree$edge.length) ## Discretise edge lengths
+    zz=run.viterbi.discrete(tree,mouse = mouse,
+                            prior.probs=get_prior_probs_full_2epoch(ph=rr["EMB->HSC"],
+                                                                  pm=rr["EMB->MPP"],
+                                                                  p_h_m=rr["HSC->MPP"],
+                                                                  p_m_h=rr["MPP->HSC"]))
+    chg=zz$vit$changes %>% group_by(s.parent,s.child) %>% summarise(N=n(),.groups = "drop")  %>%  mutate(change=sprintf("%s->%s",c("HSC","MPP","EMB")[s.parent+1],c("HSC","MPP","EMB")[s.child+1])) %>% select(change,N)
+    changes=rbind(changes,chg %>% mutate(ID=mouse,MODEL=model,LL=zz$vit$LL))
+    zz$vit$changes=zz$vit$changes %>% mutate(model=model)
+    viterbis[[mouse]]=list(mouse.specific=zz,mouse.specific.param=rr)
+}
+model="Age Group Specific Model (Young)"
+rr=rm[,"young"]
+for(mouse in mice[4:6]){
+    tree=trees[[mouse]]
+    tree$edge.length=round(tree$edge.length) ## Discretise edge lengths
+    zz=run.viterbi.discrete(tree,mouse = mouse,
+                            prior.probs=get_prior_probs_full_2epoch(ph=rr["EMB->HSC"],
+                                                                  pm=rr["EMB->MPP"],
+                                                                  p_h_m=rr["HSC->MPP"],
+                                                                  p_m_h=rr["MPP->HSC"]))
+    chg=zz$vit$changes %>% group_by(s.parent,s.child) %>% summarise(N=n(),.groups = "drop")  %>%  mutate(change=sprintf("%s->%s",c("HSC","MPP","EMB")[s.parent+1],c("HSC","MPP","EMB")[s.child+1])) %>% select(change,N)
+    changes=rbind(changes,chg %>% mutate(ID=mouse,MODEL=model,LL=zz$vit$LL))
+    zz$vit$changes=zz$vit$changes %>% mutate(model=model)
+    viterbis[[mouse]]=list(mouse.specific=zz,mouse.specific.param=rr)
+}
+```
+
+```{r counts, fig.width=12, fig.height=6,echo=TRUE,results='hide',message=FALSE,warning=FALSE}
+g2=ggplot(changes,aes(x=ID,y=N,fill=change))+geom_col(width=0.5)+xlab("")+
+  ylab("Number of Transitions")+theme_bw()+ggtitle("Transition Type Counts")+
+  theme(legend.title=element_blank())
+print(g2)
+```
+
+```{r echo=TRUE,results='hide',message=FALSE,warning=FALSE}
+cc=do.call("rbind",lapply(viterbis, function(x) x$mouse.specific$vit$change))
+cc=cc %>% mutate(status=ifelse(child.count==1,"Private","Shared"))
+```
+
+```{r FULLMODELTIMINGS_END,  fig.width=12,fig.height=8,echo=TRUE,results='hide',message=FALSE,warning=FALSE}
+ms=ggplot(cc %>% mutate(change=sprintf("%s->%s",c("HSC","MPP","EMB")[s.parent+1],c("HSC","MPP","EMB")[s.child+1])) ,aes(x=change,y=end,fill=change))+geom_violin(alpha=0.3,scale = "width")+geom_quasirandom(size=1.5,width=0.2,aes(color=status))+facet_wrap(~ID)+theme_bw()+ylab("End of Branch( Molecular Time)")+ggtitle("Branch based upper bound to the timings of transitions")
+print(ms)
+```
+
+
+```{r TIMINGS_DIST_ALL_SUMMARY,fig.width=12,fig.height=8,comment=NA,echo=TRUE,results='hide',message=FALSE,warning=FALSE}
+dff=do.call("rbind",lapply(mice,function(mouse){
+  get_last_transition_heights(viterbis[[mouse]]$mouse.specific$vit) %>% mutate(ID=mouse)
+  })
+  )
+dff=rbind(dff %>% filter(ID %in% mice[1:3]) %>% mutate(ID="Old"),
+          dff %>% filter(ID %in% mice[4:6]) %>% mutate(ID="Young"),
+          dff %>% mutate(ID="Cohort")) %>% 
+  mutate(ID=factor(ID,c(mice,c("Old","Young","Cohort"))))
+dfs=dff %>% group_by(ID,celltype) %>% summarise(median_upper_bound=median(end),median_lower_bound=median(start))
+dff=dff %>% inner_join(dfs)
+
+gp1=ggplot(dff,aes(x=end,col=celltype))+stat_ecdf(geom="step")+
+geom_vline(data=dff %>% filter(celltype=="HSC"),aes(xintercept = median_upper_bound,col=celltype))+
+geom_vline(data=dff %>% filter(celltype=="MPP"),aes(xintercept = median_upper_bound,col=celltype))+
+facet_wrap(~ID)+theme_bw()+ggtitle("End of Branch based Upper Bound")
+
+gp2=ggplot(dff,aes(x=start,col=celltype))+
+stat_ecdf(geom="step")+
+geom_vline(data=dff %>% filter(celltype=="HSC"),aes(xintercept = median_lower_bound,col=celltype))+
+geom_vline(data=dff %>% filter(celltype=="MPP"),aes(xintercept = median_lower_bound,col=celltype))+
+facet_wrap(~ID)+theme_bw()+ggtitle("Start of Branch based Lower Bound")
+
+fg=ggarrange(gp2+ rremove("ylab") + rremove("xlab"),gp1+ rremove("ylab") + rremove("xlab"),ncol=1)
+annotate_figure(fg, left = textGrob("Fraction of cells with final identity", 
+                                    rot = 90, vjust = 1, gp = gpar(cex = 1.3)),
+                bottom = textGrob("Molecular Time (# Mutations)", gp = gpar(cex = 1.3)))
+```
+The following table shows the upper bound for the molecular timing of when at least 50% of HSCs and MPPs have differentiated to their observed state:
+
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+autofit(flextable(dfs %>% select(-median_lower_bound) %>% pivot_wider(names_from = "celltype",values_from = "median_upper_bound")) )
+```
+
+### Theoretical Trajectories based on the inferred Markov chain
+
+```{r TRAJ_MUTSCALED, fig.width=12,fig.height=6,echo=TRUE,results='hide',message=FALSE,warning=FALSE}
+rm=sapply(per.agegroup.fit,report_results)
+param=rm[,"old"]
+pp=get_prior_probs_full_2epoch(ph =param['EMB->HSC'],pm = param['EMB->MPP'],p_m_h = param['MPP->HSC'],p_h_m = param['HSC->MPP'])
+tm=getTransitionMatrices(pp)
+told=plotTransitionMatrices(tm,"Old Mice",xmax = 150)
+param=rm[,"young"]
+pp=get_prior_probs_full_2epoch(ph =param['EMB->HSC'],pm = param['EMB->MPP'],p_m_h = param['MPP->HSC'],p_h_m = param['HSC->MPP'])
+tm=getTransitionMatrices(pp)
+tyoung=plotTransitionMatrices(tm,"Young Mice",xmax = 60)
+ggarrange(told,tyoung,ncol=2)
+```
+
+### Formally testing the HSC First model
+
+Here formally test the HSC first model using a likelihood ratio test.
+```{r echo=TRUE,results='hide',message=FALSE,warning=FALSE}
+DF=data.frame(group=c("old","young"),
+              LL_FULL=sapply(per.agegroup.fit,report_results)["LL",],
+LL_HSC_FIRST=sapply(hsc.first,report_results)["LL",],
+diff_degree_freedom=1)
+DF=rbind(DF,
+         data.frame(group="Combined",LL_FULL=sum(DF$LL_FULL),LL_HSC_FIRST=sum(DF$LL_HSC_FIRST),diff_degree_freedom=sum(DF$diff_degree_freedom)))
+   DF=DF %>% mutate(P=pchisq(-2*(LL_HSC_FIRST-LL_FULL),df=diff_degree_freedom,lower.tail = FALSE))      
+P_Full_Model_vs_HSC_FIRST=DF[3,"P"]
+```
+```{r echo=TRUE}
+FitFlextableToPage(flextable(DF %>% mutate(P=sprintf("%4.3g",P))))
+```
+
+On the basis of this simple model we can formally reject the HSC first model across the combined age group model (P=`r sprintf("%4.3g",P_Full_Model_vs_HSC_FIRST)`) and also for the old group (P=`r sprintf("%4.3g",DF["old","P"])`). It is worth noting that we are unable to reject the HSC first model for the young animal group (P=`r sprintf("%4.3g",DF["young","P"])`)
+
+
+## Details on the Hidden Markov Tree approach
+
+### Modelling the ancestral unobserved MPP and HSC states with a hidden markov tree
+
+We defined 3 unobservable (“hidden”) ancestral states - embryonic precursor cell (EMB), HSC and MPP - and we used the observed outcomes (HSC or MPP tip states) to infer the transition probabilities between these identities and the most likely sequence of cell identity transitions during life.
+
+The transitions between states are modeled by a discrete time markov chain with the one step in time representing one mutation in molecular time.  We require the root of the tree, presumably the zygote, to start in the "EMB" state and then require it to stay in that state until 10 mutations in molecular time. After 10 mutations the cell then have a non-zero probability of transitioning to another state given by the transition matrix $\boldsymbol{M}$ :
+
+\[\boldsymbol{M}=\begin{pmatrix}
+1-p_{HSC->MPP} & p_{HSC->MPP} & 0\\
+p_{MPP->HSC} & 1-p_{MPP->HSC} & 0\\
+p_{EMB->HSC} & p_{EMB->MPP} & 1-p_{EMB->HSC} - p_{EMB->MPP}
+\end{pmatrix}\]
+
+This then implies the following transition probabilities for branch $u$, having length $l(u)$ (excluding any overlap with molecular time less than 10 mutations), starting in state $i$ and ending in state $k$ :
+
+\[P_{i,k}(u)=\left(\boldsymbol{M}^{l(u)}\right)_{i,k}\]
+
+
+Now for a node that is in a specified state the probability of descendent states, and emitted data and is independent of the rest of tree. This  conditional independence property facilitates recursive calculation of a best path ("Viterbi path"), likelihood of the Viterbi path and full likelihood of the observed phenotypes given the model. The approach is essentially an inhomogenous special case of the approach detailed in [ref].   
+
+## Upward algorithm for determining likelihood of the observed states given $\boldsymbol{M}$ and a prior probability of root state $\boldsymbol{\pi}$
+
+The probability of the observed data descendant from a node $u$ whose end of branch state is $i$ is given by:
+
+\[ P_u(D_u| i)=\prod_{v\in \text{children}(u)} \left(\sum_{k=1}^S P_{i,k}(v) P_v(D_v | k)\right) \]
+
+where $S$ is the number of hidden states, $S=3$ in our case and we $D_u$ denotes the observed data descendant of $u$ i.e. in our case the observed tip phenotypes of the clade defined by $u$.
+
+### Initialisation of terminal branches 
+
+The probability of observing a matching phenotype is assumed to be :
+\[ P_u(\text{Observed Penotype of }u=i | i ) = 1-\epsilon \]
+
+The probability of observing a mismatching phenotype is $j \neq i$ 
+\[ P_u(\text{Observed Penotype of }u=i | i ) = 0.5 \epsilon \]
+
+The root probability  $P_{\text{root}}(D_{\text{root}}| i)$ is calculated recursively from the above and the model likelihood is given by:
+
+\[ P=\sum_{i=1}^S \pi_i P_{\text{root}}(D_{\text{root}}| i)\]
+
+We assume essentially error-free phenotyping and set $\epsilon=1e-12$
+
+## A Viterbi like algorithm to determine the most likely sequence of hidden end of branch states
+
+This algorithm can be run in conjunction with upward algorithm. Here, instead of summing over all possible states the idea is keep track of the most likely descendant states for each of possible states of the current node $u$.  
+
+The quantity $\delta_u(i)$ is the probability of the most likely sequence of descendant states given that node $u$ ends in state $i$ :
+
+\[\delta_u(i)=\prod_{v\in \text{children}(u)} \left( \max_k \left\{\delta_v(k) P_{i,k}(v)\right\} \right) \]
+
+Additionally, for each node we store the most probable child states given that $u$ is in state $i$:
+
+\[\Psi_{u,v}(i)=\text{argmax}_k\left\{\delta_v(k) P_{i,k}(v)\right\}\]
+
+The tip deltas are initialised using the emission probabilities:
+
+\[\delta_u(i)=P_u(\text{Observed Penotype of }u | i)\]
+
+The above provides a recipe for recursively finding $\delta_{root}(i)$ and is combined with prior root probabilty $\boldsymbol{\pi}$ to give the most likely root state, $\text{max}_k \left\{\delta_{\text{root}}(i)\right\}$, in our case we set the prior probality of "EMB" to unity - so EMB is the starting state.  The child node states are then directly populated $\Psi$.
+
+Ref: Durand, J-B., Paulo Goncalves, and Yann Guédon. "Computational methods for hidden Markov tree models-An application to wavelet trees." IEEE Transactions on Signal Processing 52.9 (2004): 2551-2560.
+
+
