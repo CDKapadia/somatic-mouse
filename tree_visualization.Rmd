@@ -1,0 +1,123 @@
+---
+title: "Phylogeny visualization"
+author: "Chiraag Kapadia, Nick Williams"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = './scripts/')
+```
+
+### Summary
+
+##### 0.  Define plotting function. Implements HSC/MPP coloring of branches.
+##### 1.  HSC-MPP combined trees, as shown in Figure 2 and Supplementary Figure 2.
+##### 2.  HSC trees
+##### 3.  MPP trees
+
+#### Library and support script dependencies
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(phangorn)
+library(adephylo)
+source("load_and_annotate_tree.R")
+source("trees.R")
+source("plotting_utils.R")
+
+```
+
+#### Import tree objects for analysis, intialize necessary variables.
+
+```{r}
+tree_list = readRDS("~/Desktop/somatic_mouse/tree_data/all_tree_list.rds")
+```
+
+### 0. Define plotting functions
+
+```{r warning=FALSE}
+plot_molecular_time_tree=function(md,s){
+    md$pdx <- set_germline_branch_to_zero(md$pdx) #I think this is redundant with above..
+    ymax=250
+  GREYCOLOR="grey30"
+  
+  if(grepl("combined",s)){
+    HSCCOLOR="#005AB5"
+    MPPCOLOR="#DC3220"
+    tipcolors<-rep(GREYCOLOR,length(md$pdx$tree_ml$tip.label))
+    
+    underlyingSamples = str_split(s,"_")[[1]][1]
+    hsc <- read.table(sprintf("%s/../data/%s.cfg",getwd(),underlyingSamples),sep = "\t", header = T)
+    mpp <- read.table(sprintf("%s/../data/%s_MPP.cfg",getwd(),underlyingSamples),sep = "\t", header = T)
+    
+    tipcolors[which(is.element(md$pdx$tree_ml$tip.label,hsc$SHORT_LABEL))] <- HSCCOLOR
+    tipcolors[which(is.element(md$pdx$tree_ml$tip.label,mpp$SHORT_LABEL))] <- MPPCOLOR
+    md$pdx$tree_ml$tip.color <- tipcolors
+    
+    edgecolors<-rep(GREYCOLOR,length(md$pdx$tree_ml$edge.length))
+    edgecolors[unlist(lapply(hsc$SHORT_LABEL,function(tip){which.edge(md$pdx$tree_ml,tip)}))]<-HSCCOLOR
+    edgecolors[unlist(lapply(mpp$SHORT_LABEL,function(tip){which.edge(md$pdx$tree_ml,tip)}))]<-MPPCOLOR
+    
+    tipsByNode=listTips(md$pdx$tree_ml)
+    for(i in 1:md$pdx$tree_ml$Nnode){
+      n=tipsByNode[[i]]
+      tips<-names(n)
+      if(all(is.element(tips,hsc$SHORT_LABEL))){
+        edgecolors[which.edge(md$pdx$tree_ml,tips)]<-HSCCOLOR
+        missingBranch = setdiff(
+          unlist(lapply(unique(as.vector(md$pdx$tree_ml$edge[which.edge(md$pdx$tree_ml,tips),])),function(i){which.edge(md$pdx$tree_ml,i)})),
+          which.edge(md$pdx$tree_ml,tips)
+        )
+        edgecolors[missingBranch]<-HSCCOLOR
+      }
+      if(all(is.element(tips,mpp$SHORT_LABEL))){
+        edgecolors[which.edge(md$pdx$tree_ml,tips)]<-MPPCOLOR
+        missingBranch = setdiff(
+          unlist(lapply(unique(as.vector(md$pdx$tree_ml$edge[which.edge(md$pdx$tree_ml,tips),])),function(i){which.edge(md$pdx$tree_ml,i)})),
+          which.edge(md$pdx$tree_ml,tips)
+        )
+        edgecolors[missingBranch]<-MPPCOLOR
+      }
+    }
+    
+    md$pdx$tree_ml$color <- edgecolors
+    
+  }
+  
+    plot_basic_tree(md$pdx,s,b.annot.just.shared=T,ymax=ymax,cex.label=0,cex.terminal.dots=0, lwd=1.3,default_edge_color=GREYCOLOR,cv=CV,genes=NULL)
+}
+
+```
+
+### 1. HSC-MPP combined trees
+
+```{r message=FALSE, warning=FALSE}
+samples_c <- c("MD7180_combined_HSC_MPP","MD7181_combined_HSC_MPP","MD7182_combined_HSC_MPP", "MD7183_combined_HSC_MPP", "MD7184_combined_HSC_MPP","MD7185_combined_HSC_MPP")
+for(s in samples_c){
+  PD2=tree_list[[s]]
+  plot_molecular_time_tree(PD2,s)
+}
+```
+### 2. HSC trees
+
+```{r message=FALSE, warning=FALSE}
+samples_hsc <- c("MD7180","MD7181","MD7182","MD7183","MD7184","MD7185")
+for(s in samples_hsc){
+  PD2=tree_list[[s]]
+  plot_molecular_time_tree(PD2,s)
+}
+```
+
+### 3. MPP trees
+
+```{r message=FALSE, warning=FALSE}
+samples_mpp <- c("MD7181_MPP", "MD7182_MPP", "MD7184_MPP", "MD7185_MPP","MD7180_MPP","MD7183_MPP")
+for(s in samples_mpp){
+  PD2=tree_list[[s]]
+  plot_molecular_time_tree(PD2,s)
+}
+```

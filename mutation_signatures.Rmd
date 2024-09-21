@@ -1,0 +1,201 @@
+---
+title: "Assigment of mutation signatures following HDP component extraction"
+author: "Chiraag Kapadia, Daniel Leongamornlert, Nick Williams"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = '~/Desktop/somatic_mouse/scripts/')
+```
+
+### Summary
+
+0.  Import HDP output for analysis
+1.  Assign identities to HDP clusters
+2.  Reattribute mutations on the unassignent components and assess fit
+3.  Assignment extracted signatures to tree branches
+4.  Aggregate signature-specific mutation burden over life
+5.  Branch location signature accrual over time
+
+#### Library and support script dependencies
+
+```{r message=FALSE, warning=FALSE}
+library(sigfit)
+library(MutationalPatterns)
+library(scales)
+library(dplyr)
+SPECIES_BUILD="mm10"
+SPECIES="Mmusculus"
+source("revised_sigs.R")
+```
+
+#### Import HDP output for analysis
+
+```{r warning=FALSE}
+setwd("~/Desktop/HDP/")
+mc.HSC.MPP_condensedallNOCOLON.hSorted_tissue_prior_multi_extract= readRDS("mc.HSC.MPP_condensedallNOCOLON.hSorted_tissue_prior_multi_extract.rds")
+tissuemut_count.raw=readRDS("tissuemut_count.raw.rds") 
+```
+
+### 1. Assign identities to HDP clusters
+
+```{r}
+pcawg=get_pcawg60()
+
+hdpinfo=extract_details_from_hdpres(mc.HSC.MPP_condensedallNOCOLON.hSorted_tissue_prior_multi_extract,
+                                    priorsigs = pcawg, #any  
+                                    mutcount = tissuemut_count.raw,
+                                    threshold = .95) # cosime sim of 0.95 to match a known signature
+plot_96_profile(hdpinfo$signatures)
+hdpinfo$csm_max
+
+```
+
+We note that N1 contains C>A mutations resembling SBS18, and N2 constains T>G mutations and a profile resembling SBS5 mixed with SBS1. 
+
+### 2. Reattribute mutations on the unassignent components and assess fit
+
+```{r message=FALSE, warning=FALSE}
+sfres = fit_signatures(t(round(hdpinfo$signatures*1e6)),
+                       t(pcawg[,c("SBS1","SBS18","SBS5")]), #Matched priors
+                       iter=10000)
+reconstructions =retrieve_pars(sfres, "reconstructions")
+
+plot_compare_profiles(rowSums(round(hdpinfo$signatures*1e6)),
+                      rowSums(t(reconstructions$mean)),
+                      profile_names = c("Original","Sigfit\nReconstructed") )
+```
+
+### 3. Assign mutations to tree branches, plot trees
+
+Supporting scripts and tree objects
+```{r message=FALSE, warning=FALSE}
+source("treebased_signature_attribution.R")
+source("load_and_annotate_tree.R")
+source("trees.R")
+library(cowplot)
+library(phangorn)
+library(lme4)
+library(ggeffects)
+pcawg=get_pcawg60()
+tree_list = readRDS("~/Desktop/somatic_mouse/tree_data/all_tree_list.rds")
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE,results='hide',fig.keep='all'}
+samples_hsc <- c("MD7180","MD7181","MD7182","MD7183","MD7184","MD7185")
+PDD=tree_list[samples_hsc]
+lapply(PDD, function(p){ 
+  p$pdx$dat$info=get_clade_sigs_mouse(p,prior=as.matrix(pcawg[, c("SBS1","SBS5","SBS18")]),extracats=c())
+  ww=plot_mouse_sig_tree_posterior(p,prior=as.matrix(pcawg[, c("SBS1","SBS5","SBS18")]),                                   focal.signature = "SBS18",b.ggbar_separate = T,lwd=1.3,default_edge_color="grey30")
+})
+```
+
+### 4. Aggregate signature changes over life
+
+```{r, eval=F, echo=T}
+PDD2=lapply(PDD,function(PD){
+  PD=make_ultrametric_PD_chiraag(PD) 
+  PD$pdx$dat$info=get_clade_sigs(PD,prior=pcawg[,c("SBS1","SBS5","SBS18")],extracats = c());
+  PD=add_v2_sig_to_pdx(PD,prior=pcawg[,c("SBS1","SBS5","SBS18")],info = PD$pdx$dat$info);PD
+  })
+```
+
+```{r}
+PDD2=readRDS("~/Desktop/somatic_mouse/data/signature_annotated_trees.rds")
+df=do.call("rbind",lapply(PDD2,function(PD) get_sig_burdens(PD,priors = pcawg[,c("SBS1","SBS5","SBS18")])$df))
+
+#Wrangle for ggplot..
+#Whereever age is added, some are off..
+df$age_at_sample_exact[which(grepl("80|81|82",df$patient))]<-30
+df$age_at_sample_exact[which(grepl("83|84|85",df$patient))]<-3
+df=subset(df, select = -c(nsub_adj) )
+df_subset=df[which(!grepl("MPP",df$patient)),];comp="HSC"
+# df_subset=df[which(grepl("MPP",df$patient)),];comp="MPP"
+
+df_pivot = df_subset %>% pivot_longer(names_to="burden_type",values_to = "burden",
+                           cols = c(sprintf("nsub_adj_%s",c("SBS1","SBS5","SBS18"))))
+
+list_fixed=list()
+pr=do.call("rbind",
+    lapply(c(sprintf("nsub_adj_%s",c("SBS1","SBS5","SBS18"))), function(sbs){
+  dfff=df_pivot[which(df_pivot$burden_type==sbs),]
+  lmer1 =  lmer(burden ~ age_at_sample_exact + (0 + age_at_sample_exact|donor), data = dfff)
+  print(summary(lmer1))
+  pr=ggpredict(lmer1, "age_at_sample_exact")
+  colnames(pr)[1]<-"age_at_sample_exact"
+  lm_fixef=as.data.frame(fixef(lmer1))
+  list_fixed[[sbs]]<<-data.frame(formula=sprintf("burden ~ %s*age + %s",round(lm_fixef[[1]][2],2),round(lm_fixef[[1]][1],2)),
+                                 burden_type=sbs )
+  pr$burden_type=sbs
+  pr
+}))
+list_fixed=do.call("rbind",list_fixed)
+
+list_fixed$y=0;list_fixed$y<-c(max(df_pivot$burden)-10,max(df_pivot$burden)-30,max(df_pivot$burden)-50)
+
+colorscheme_nsub=data.frame(COL=(c("grey30", "#BB5566","#004488","#DDAA33")),SIG=(c("nsub_adj","nsub_adj_SBS1","nsub_adj_SBS5","nsub_adj_SBS18")))
+ggplot(df_pivot,aes(x=age_at_sample_exact,y=burden,col=burden_type))+
+  # geom_violin(position = position_dodge(width = 5))+
+  # geom_point()+
+  # geom_violin(aes(col = burden_type,group=age_at_sample_exact), position = position_dodge(width = 5))+
+  geom_point(position =  position_jitterdodge(dodge.width = 2,jitter.width=.5, seed = 1))+
+  ylab("SNVs")+ggtitle(sprintf("%s Sig burden",comp))+
+  xlab("Age (months)")+
+  # geom_smooth(method="lm",fullrange=T)+
+  geom_line(data =pr, aes(y = predicted,col=burden_type),size=1) +
+  geom_ribbon(data=pr, aes(y = NULL, ymin = conf.low, ymax = conf.high,
+                   color = burden_type, fill = NULL
+  ),alpha = .15)+
+  geom_text(data=list_fixed,aes(x=3,y=y,col=burden_type,label=formula),hjust=0)+
+  theme_minimal_hgrid()+
+  # stat_regline_equation(
+  #   aes(label =  paste(..eq.label.., ..adj.rr.label.., sep = "~~~~")),
+  #   formula = formula
+  # )+  
+  scale_color_manual(breaks=colorscheme_nsub$SIG, values=colorscheme_nsub$COL)
+```
+
+### 5. Branch location signature accrual over time
+
+```{r}
+PDD2=readRDS("~/Desktop/somatic_mouse/data/signature_ultrametric_trees.rds")
+df2=do.call("rbind",lapply(PDD2,function(PD) get_sig_burdens(PD,priors = pcawg[,c("SBS1","SBS5","SBS18")])$traj %>% mutate(donor=PD$patient)))
+df2$age_at_sample_exact<-0
+df2$age_at_sample_exact[which(grepl("80|81|82",df2$donor))]<-30
+df2$age_at_sample_exact[which(grepl("83|84|85",df2$donor))]<-3
+
+df2_subset=df2[which(!grepl("MPP",df2$donor)),];comp="HSC"
+# df2_subset=df2[which(grepl("MPP",df2$donor)),];comp="MPP"
+
+df2_subset_old=df2_subset[which(df2_subset$age_at_sample_exact==30),]; #comp="Aged"
+df2_subset_young=df2_subset[which(df2_subset$age_at_sample_exact==3),]; #comp="Young"
+
+for(age in c("young","old")){
+  for(whereinbranch in c("start","mid","end")){
+    colorscheme_nsub=data.frame(COL=(c("#BB5566","#004488","#DDAA33")),SIG=sprintf("%s_%s",c("SBS1","SBS5","SBS18"),whereinbranch))
+    
+    dff=df2_subset #Do it with all ages.
+    dff=dff[which(dff$SBS5_end!=0),]
+    
+    dff_tips_aged=dff[which(round(dff$end,1)==135.0),] %>% pivot_longer(names_to="burden_type",values_to = "interim_burden",cols = sprintf("%s_%s",c("SBS1","SBS5","SBS18"),whereinbranch))
+    dff_tips_young=dff[which(round(dff$end,1)==15.0),] %>% pivot_longer(names_to="burden_type",values_to = "interim_burden",cols = sprintf("%s_%s",c("SBS1","SBS5","SBS18"),whereinbranch))
+    dff_tips=dff[which(round(dff$end,1)==15.0 | round(dff$end,1)==135.0),] %>% pivot_longer(names_to="burden_type",values_to = "interim_burden",cols = sprintf("%s_%s",c("SBS1","SBS5","SBS18"),whereinbranch))
+    
+   p=ggplot(dff %>% pivot_longer(names_to="burden_type",values_to = "interim_burden",cols = sprintf("%s_%s",c("SBS1","SBS5","SBS18"),whereinbranch)),
+           aes(x=end,y=interim_burden,col=burden_type))+
+      geom_point(position =  position_jitterdodge(dodge.width = 0,jitter.width=1, seed = 1),size=0.5)+
+     scale_x_continuous(breaks = seq(0,130,26))+
+      ylab(sprintf("Branch %s burden",whereinbranch))+
+      theme_minimal_grid()+
+     theme(legend.position = "none")+
+      ggtitle(sprintf("%s branches, burden at branch %s, %s",comp,whereinbranch,age))+
+      scale_color_manual(breaks=colorscheme_nsub$SIG, values=colorscheme_nsub$COL)
+    plot(p)
+  }
+}
+
+```
+
+

@@ -1,0 +1,93 @@
+---
+title: "Population trajectory inference using phylodyn"
+author: "Chiraag Kapadia"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = './scripts/')
+```
+
+### Summary
+
+0.  Define plotting function. Implements HSC/MPP coloring of branches.
+1.  Generate phylodyn plots, as shown in Fig. 3
+
+#### Library and support script dependencies
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(phylodyn)
+library(phangorn)
+library(phytools)
+source("load_and_annotate_tree.R")
+source("trees.R")
+source("plotting_utils.R")
+
+```
+
+#### Import tree objects for analysis, intialize necessary variables.
+
+```{r}
+tree_list = readRDS("~/Desktop/somatic_mouse/tree_data/all_tree_list.rds")
+```
+
+### 0. Define plotting functions
+
+```{r warning=FALSE}
+makePhylodynPlot_HSC_MPP_Overlay=function(HSC,MPP,s){
+  HSCCOLOR="#005AB5"
+  MPPCOLOR="#DC3220"
+  GREYCOLOR="grey30"
+  HSC_tree=HSC$pdx$tree_ml
+  MPP_tree=MPP$pdx$tree_ml
+  
+  HSC_tree<- drop.tip(HSC_tree,"zeros") #drop zero out branch.
+  MPP_tree<- drop.tip(MPP_tree,"zeros") #drop zero out branch.
+  
+  HSC_tree.ut<-make.ultrametric.tree(HSC_tree) 
+  MPP_tree.ut<-make.ultrametric.tree(MPP_tree) 
+  
+  HSC_tree.ut$edge.length=HSC_tree.ut$edge.length/max(nodeHeights(HSC_tree.ut)) 
+  MPP_tree.ut$edge.length=MPP_tree.ut$edge.length/max(nodeHeights(MPP_tree.ut)) 
+  
+  # multiply by age (here given in weeks for the 30 month mouse).  This would give an age based ultrametric tree. 
+  if(grepl("80|81|82",s)){
+    age=132+3;  
+  }else{
+    age=12+3;
+  }
+  
+  HSC_tree.ut$edge.length=HSC_tree.ut$edge.length*age
+  MPP_tree.ut$edge.length=MPP_tree.ut$edge.length*age
+  
+  ylim=c(1,1e7)
+
+  HSC_tree.utfullbnpr=BNPR(HSC_tree.ut,lengthout=1000)
+  MPP_tree.utfullbnpr=BNPR(MPP_tree.ut,lengthout=1000)
+  par(mfrow=c(1,2))
+  plot_BNPR(HSC_tree.utfullbnpr,col=HSCCOLOR,main=HSC$patient,ylim=ylim,heatmaps=F,ylab = "Time (weeks)")
+  plot_BNPR(MPP_tree.utfullbnpr,col=MPPCOLOR,main=MPP$patient,ylim=ylim,newplot = T, heatmaps = F,ylab = "Time (weeks)")
+
+}
+```
+
+### 1. Generate phylodyn plots
+
+```{r message=FALSE, warning=FALSE}
+samples_hsc <- c("MD7180","MD7181","MD7182","MD7183","MD7184","MD7185")
+samples_mpp <- c("MD7181_MPP", "MD7182_MPP", "MD7184_MPP", "MD7185_MPP","MD7180_MPP","MD7183_MPP")
+
+for(s in samples_hsc){
+  HSC=tree_list[[s]]
+  MPP=tree_list[[paste0(s,"_MPP")]]
+  
+  makePhylodynPlot_HSC_MPP_Overlay(HSC=HSC,MPP=MPP,s = s)
+
+}
+```
+

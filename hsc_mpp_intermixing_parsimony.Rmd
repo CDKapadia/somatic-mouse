@@ -1,0 +1,383 @@
+---
+title: "Clade intermixing analysis"
+author: "Chiraag Kapadia, Nick Williams\n"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = './scripts/')
+```
+
+### Summary
+
+1. Clustering by defined clades based on tree cutoffs
+2. Nearest neighbor analysis (Does the most closely related cell)
+3. Parsimony of an HSC-first or MPP-first model
+
+NB: The number of bootstrap simulations has been reduced in the below markdown for timely completion of scripts. See comment lines for actual number of interations completed (generally tenfold more).
+
+#### Library and support script dependencies
+
+```{r message=FALSE, warning=FALSE}
+library(parallel)
+library(ggridges)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+source("load_and_annotate_tree.R")
+source("trees.R")
+source("plotting_utils.R")
+
+```
+
+#### Import tree objects for analysis
+
+```{r}
+tree_list = readRDS("~/Desktop/somatic_mouse/tree_data/all_tree_list.rds")
+```
+
+### 1. Clustering by tree cutoff.
+NB: increase simulation count for actual analysis (may take a while)
+
+#### Define functions to assess clustering of cell identity
+```{r}
+check_clustering=function(tree,time_point=20,min.size=3,N=1000){
+  ## imagine we have a tree with labels containing "MPP" or not. 
+  ##time_point = 100
+  nodeheights <- nodeHeights(tree)
+  clades_post_cutoff=tree$edge[,2][nodeheights[,1] < time_point & !nodeheights[,2] < time_point]
+  print(clades_post_cutoff)
+  clade_sizes=sapply(clades_post_cutoff,function(node) {length(get_samples_in_clade(node,tree))})
+  print(clade_sizes)
+  
+get_metric=function(tree){
+    tmp=sapply(clades_post_cutoff,function(node) {sum(grepl("MPP",get_samples_in_clade(node,tree)))})
+    counts=cbind(a=tmp,b=clade_sizes-tmp)
+    idx=which(rowSums(counts)>=min.size)
+    wts=clade_sizes[idx]/sum(clade_sizes[idx])
+    parity=sum(tree$tip.label=="MPP")/(sum(tree$tip.label=="MPP")+sum(tree$tip.label=="HSC"))
+    sum(wts*abs(0.5-counts[idx,1]/rowSums(counts)[idx]))
+  }
+  metric=get_metric(tree)
+  null.metric=sapply(1:N,function(i){
+    tree$tip.label=sample(tree$tip.label)
+    get_metric(tree)
+  })
+  list(metric=metric,null.metric=null.metric)
+}
+
+get_tips_in_clade=function(node,tree){
+  if(node<=length(tree$tip.label)){
+    return(tree$tip.label[node])
+  }
+  intersect(get_all_node_children(node,tree),1:length(tree$tip.label))
+}
+```
+
+#### Assess clustering 
+  NB: increase simulation count for actual analysis (may take a while)
+
+```{r}
+samples_combined=c("MD7180_combined_HSC_MPP", "MD7183_combined_HSC_MPP","MD7184_combined_HSC_MPP", "MD7181_combined_HSC_MPP", "MD7182_combined_HSC_MPP", "MD7185_combined_HSC_MPP")
+PDD=tree_list[samples_combined]
+clustering_metrics_list = 
+    mclapply(PDD,function(PD){
+    tree = PD$pdx$tree_ml
+    s=PD$patient
+    tree<- drop.tip(tree,"zeros") #drop zero out branch.
+    tree$tip.label
+    underlyingSamples = str_split(s,"_")[[1]][1]
+    hsc <- read.table(sprintf("~/Desktop/somatic_mouse/data/%s.cfg",underlyingSamples),sep = "\t", header = T)
+    mpp <- read.table(sprintf("~/Desktop/somatic_mouse/data/%s_MPP.cfg",underlyingSamples),sep = "\t", header = T)
+    
+    relabel=rep("UNASSIGNED",length(tree$tip.label))
+    relabel[which(is.element(tree$tip.label,hsc$SHORT_LABEL))] <- "HSC"
+    relabel[which(is.element(tree$tip.label,mpp$SHORT_LABEL))] <- "MPP"
+    # print(unique(relabel))
+    tree$tip.label<-relabel
+    
+    # check_clustering(tree,time_point = 20,N = 10000,min.size = 3)
+    check_clustering(tree,time_point = 20,N = 1000,min.size = 3) #Perform 10000 runs for actual analysis
+    
+  },mc.cores = 4)
+names(clustering_metrics_list)<-names(PDD)
+```
+
+
+#### Calculate p-values
+
+```{r}
+for (n in names(clustering_metrics_list)){
+    
+    q=clustering_metrics_list[[n]]
+    dist=sort(c(q$metric,q$null.metric),decreasing = T)
+    
+    pval=(median(which(dist==q$metric))+1) / (length(q$null.metric)+1)
+    print(paste(c(n,pval)))
+  }
+```
+
+#### Plot
+
+```{r}
+df_null= data.frame(matrix(nrow = 0, ncol = 3))
+  df_observed= data.frame(matrix(nrow = 0, ncol = 3))
+  for(n in names(clustering_metrics_list)){
+    l=clustering_metrics_list[[n]]
+    actual=l[[1]]
+    nullmetric=l[[2]]
+    df=data.frame(nullmetric=nullmetric)
+    df$sample=n
+    df$pdid=str_sub(n,1,6)
+    df_null=rbind(df_null,df)
+    
+    dfa=data.frame(observed=actual)
+    dfa$sample=n
+    dfa$pdid=str_sub(n,1,6)
+    df_observed=rbind(df_observed, dfa)
+    
+  }
+  
+ggplot(df_null, aes(x=nullmetric,y=sample,color=pdid,fill=pdid)) +
+    geom_density_ridges(alpha=0.7,scale=1.5,panel_scaling = F,bandwidth=.02)+
+    # geom_density(alpha=0.3,adjust=5)+
+    geom_vline(data=df_observed, aes(xintercept=observed, color=pdid),
+               linetype="solid",size=1)+
+    ylab("")+
+    xlab("Departure from Equal Mixing")+
+    theme_minimal_hgrid()+
+    scale_fill_manual(values=myColors)+
+    scale_color_manual(values=myColors)+
+    theme(
+      axis.ticks =element_blank(),         # turn ticks back on
+      axis.text.y = element_blank() ,
+      axis.title.y = element_blank() # center text with tick
+    )
+```
+
+### 2. Nearest neighbor analysis
+##### Measure probability of nearest sibling branch being same cell type.
+#### Define functions to assess closest relative tree tip.
+```{r}
+## Function to estimate the nearest neighbour based overlap between classes
+# The classes vector should be in parallel to tree$tip.label and the corresponding class of a tip.label is represented
+# by a number between 1 and the number of groups (no gaps).
+get_nn_props=function(tree,classes){
+  ##
+  if(length(classes)!=length(tree$tip.label)){
+    stop("classes should be in parallel to tree$tip.label")
+  }
+  uclass=sort(unique(classes))
+  nclasses=length(uclass)
+  if(!all.equal(uclass,1:nclasses)){
+    stop("classes should go from 1 to number of unique classes")
+  }
+  
+  parents.for.tip=tree$edge[match(1:length(tree$tip.label),tree$edge[,2]),1]
+  zeros=rep(0,nclasses)
+  nnclasses=sapply(1:length(tree$tip.label),function(i) {
+    z=zeros
+    neighbours=setdiff(get_tips_in_clade(parents.for.tip[i],tree),i)
+    wt=1/length(neighbours)
+    for(neighbour in neighbours){
+      z[classes[neighbour]]=z[classes[neighbour]]+wt
+    }
+    z
+  }
+  )
+  rownames(nnclasses)=sprintf("c%s",uclass)
+  df=cbind(data.frame(class=sprintf("c%s",classes)),as.data.frame(t(nnclasses)))
+  df %>% pivot_longer(names_to="class_nn",values_to = "prop",cols =sprintf("c%s",uclass) ) %>% group_by(class,class_nn) %>% summarise(P=sum(prop),N=n(),.groups = "keep") %>% mutate(p=P/N)
+}
+
+test_nn=function(tree,classes,N=1000){
+  tmp=get_nn_props(tree,classes)
+  # metric=mean(tmp %>% filter(class!=class_nn) %>% pull(p)) #Average proportion neighbors different class.
+  metric=mean(tmp %>% filter(class==class_nn) %>% pull(p)) #Average proportion neighbors same class.
+  null.metric=sapply(1:N,function(i){
+    cls=sample(classes) ### permute the classes
+    tmp=get_nn_props(tree,cls)
+    mean(tmp %>% filter(class!=class_nn) %>% pull(p))
+  })
+  list(metric=metric,null.metric=null.metric)
+}
+```
+
+#### Assess nearest neighbor distance with bootstrap replicates
+```{r}
+samples_combined=c("MD7180_combined_HSC_MPP", "MD7183_combined_HSC_MPP","MD7184_combined_HSC_MPP", "MD7181_combined_HSC_MPP", "MD7182_combined_HSC_MPP", "MD7185_combined_HSC_MPP")
+PDD=tree_list[samples_combined]
+nn_metrics_list = 
+    mclapply(PDD,function(PD){
+      tree = PD$pdx$tree_ml
+      s=PD$patient
+      tree<- drop.tip(tree,"zeros") #drop zero out branch.
+      tree$tip.label
+      underlyingSamples = str_split(s,"_")[[1]][1]
+      hsc <- read.table(sprintf("~/Desktop/somatic_mouse/data/%s.cfg",underlyingSamples),sep = "\t", header = T)
+      mpp <- read.table(sprintf("~/Desktop/somatic_mouse/data/%s_MPP.cfg",underlyingSamples),sep = "\t", header = T)
+      
+      relabel=rep(0,length(tree$tip.label))
+      relabel[which(is.element(tree$tip.label,hsc$SHORT_LABEL))] <- 2 # HSC labelled 2.
+      relabel[which(is.element(tree$tip.label,mpp$SHORT_LABEL))] <- 1 # MPP labels 1  
+      
+      tree$tip.label<-as.integer(relabel)
+      
+      # test_nn(tree,relabel,N = 10000)
+      test_nn(tree,relabel,N = 1000) #Perform 10000 runs for actual analysis
+      
+    },mc.cores = 4)
+  names(nn_metrics_list)<-names(PDD)
+  
+```
+
+#### Plot
+```{r}
+df_null= data.frame(matrix(nrow = 0, ncol = 3))
+  df_observed= data.frame(matrix(nrow = 0, ncol = 3))
+  
+  for(n in names(nn_metrics_list)){
+    l=nn_metrics_list[[n]]
+    actual=l[[1]]
+    nullmetric=l[[2]]
+    df=data.frame(nullmetric=nullmetric)
+    df$sample=n
+    df$pdid=str_sub(n,1,6)
+    df_null=rbind(df_null,df)
+    
+    dfa=data.frame(observed=actual)
+    dfa$sample=n
+    dfa$pdid=str_sub(n,1,6)
+    df_observed=rbind(df_observed, dfa)
+    
+  }
+  
+  ggplot(df_null, aes(x=nullmetric,y=sample,color=pdid,fill=pdid)) +
+    geom_density_ridges(alpha=0.7,scale=1.5,panel_scaling = F)+
+    # geom_density(alpha=0.3,adjust=5)+
+    geom_vline(data=df_observed, aes(xintercept=observed, color=pdid),
+               linetype="solid",size=1)+
+    ylab("")+
+    xlab("Prob. Nearest Neighbors match cell type")+
+    theme_minimal_hgrid()+
+    scale_fill_manual(values=myColors)+
+    scale_color_manual(values=myColors)+
+    theme(
+      axis.ticks =element_blank(),         # turn ticks back on
+      axis.text.y = element_blank() ,
+      axis.title.y = element_blank() # center text with tick
+    )
+```
+
+### 3. Parsimony of an HSC-first or MPP-first model
+NB: increase simulation count for actual analysis (may take a while)
+#### Define functions
+```{r}
+annotate_celltype=function(tree,mouse){
+  df=read.table("../data/hsc_mpp.txt",head=TRUE,sep="\t")
+  dff=data.frame(tip.label=tree$tip.label) %>% left_join(df %>% filter(grepl(mouse,LABEL)),by=c("tip.label"="SHORT_LABEL"))
+  cols=c(HSC="blue",MPP="red")
+  tree$CELLTYPE=dff$CELLTYPE
+  tree$tip.color=cols[tree$CELLTYPE]
+  tree
+}
+
+find_unidirectional_changes=function(tree){
+  if("zeros" %in% tree$tip.label || is.null(tree$CELLTYPE)){
+    stop("Please remove zeros and add CELLTYPE to tree")
+  }
+  dff=data.frame(tip.label=tree$tip.label,CELLTYPE=tree$CELLTYPE)
+  ###  Data for cell type down sampling
+  dfs=dff %>% group_by(CELLTYPE) %>% summarise(N=n())
+  print(dfs)
+  min.n=min(dfs$N)
+  hsc=dff$tip.label[dff$CELLTYPE=="HSC"]
+  mpp=dff$tip.label[dff$CELLTYPE=="MPP"]
+  # tmp=sapply(1:10000,function(i){
+  tmp=sapply(1:1000,function(i){ #Note reduced sampling.
+    st=keep.tip(tree,c(sample(hsc,min.n),sample(mpp,min.n)))
+    dfr=dff %>% filter(tip.label %in% st$tip.label)
+    dfr$CELLTYPE=sample(dfr$CELLTYPE) ## randomly shuffle status
+    c(HSC=get_nchanges(st,top.type="HSC",dff),
+      MPP=get_nchanges(st,top.type="MPP",dff),
+      RND=get_nchanges(st,top.type="MPP",dfr),
+      NHSC=min.n)
+  }
+  )
+  n.changes=rowMeans(tmp)
+  rnd_bounds=c(quantile(tmp[3,],c(0.025,0.975)),sd(tmp[3,]))
+  n.changes=c(n.changes,RND_LB=rnd_bounds[1],RND_UB=rnd_bounds[2],RND_SD=rnd_bounds[3])
+  ## also return permuted data.
+  return(list(n.changes=n.changes,permuted.data=tmp))
+}
+
+## Top.type is "HSC" for an HSC first model and "MPP" (or anything else) for an MPP first model.
+get_nchanges=function(tree,top.type="HSC",dff){
+  dff=data.frame(tip.label=tree$tip.label) %>% inner_join(dff,by="tip.label")
+  tree$status=dff$CELLTYPE
+  ## A bit inelegant - colour is used as a proxy for celltype 
+  HSCCOLOR="blue"
+  MPPCOLOR="red"
+  tree$tip.color=ifelse(tree$status==top.type,HSCCOLOR,MPPCOLOR)
+  tree$color=rep(MPPCOLOR,length(tree$edge.length))
+  for(i in which(tree$tip.color==HSCCOLOR)){
+    parents=get_parents(i,tree$edge)
+    idx=which(tree$edge[,2] %in% parents)
+    tree$color[idx]=HSCCOLOR
+  }
+  #plot_tree(tree,cex.label = 0,cex.terminal.dots = 0)
+  idx=match(tree$edge[,1],tree$edge[,2])
+  nchanges=length(which(!is.na(idx) & tree$color!=tree$color[idx]))
+  nchanges
+}
+```
+
+#### Count transitions required under HSC-first or MPP-first models
+```{r message=FALSE, warning=FALSE}
+#Import relevant trees
+samples_combined=c("MD7180_combined_HSC_MPP", "MD7183_combined_HSC_MPP","MD7184_combined_HSC_MPP", "MD7181_combined_HSC_MPP", "MD7182_combined_HSC_MPP", "MD7185_combined_HSC_MPP")
+PDD=tree_list[samples_combined]
+PDD=lapply(PDD,function(PD){ annotate_celltype(drop.tip(PD$pdx$tree_ml,"zeros"), str_sub(PD$patient,1,6))})
+
+#Count number of transitions required under subsampled trees in which HSC and MPP counts are equal. (may take a while)
+permuted_distributions=lapply(PDD,function(tree) find_unidirectional_changes(tree))
+```
+
+#### Normalize for total colony count, then plot
+```{r warning=FALSE}
+ll=list()
+for(s in names(permuted_distributions)){
+  xx=as.data.frame(t(permuted_distributions[[s]]$permuted.data)) %>% pivot_longer(cols=c("HSC","MPP","RND"),names_to = "TYPE",values_to = "NCHANGES")
+  xx$id=str_sub(s,1,6)
+  xx$NCHANGES_normalized=xx$NCHANGES/xx$NHSC
+  ll=append(list(xx),ll)
+}
+df_permuted_dists=as.data.frame(do.call("rbind",ll))
+df_permuted_dists$totalcolonies=0
+df_permuted_dists$totalcolonies[which(df_permuted_dists$id=="MD7180")]<-184+228 #Inelegant harcoding, see Fig 1B
+df_permuted_dists$totalcolonies[which(df_permuted_dists$id=="MD7181")]<-70+59
+df_permuted_dists$totalcolonies[which(df_permuted_dists$id=="MD7182")]<-68+66
+df_permuted_dists$totalcolonies[which(df_permuted_dists$id=="MD7183")]<-188+186
+df_permuted_dists$totalcolonies[which(df_permuted_dists$id=="MD7184")]<-68+65
+df_permuted_dists$totalcolonies[which(df_permuted_dists$id=="MD7185")]<-61+63
+df_permuted_dists$NCHANGES_normalized_by_total=df_permuted_dists$NCHANGES/df_permuted_dists$totalcolonies
+coloring=c(HSC="#005AB5",MPP="#DC3220",RND="grey30")
+
+ggplot(df_permuted_dists, aes(x=NCHANGES_normalized_by_total,y=id,color=id,fill=TYPE)) +
+  geom_density_ridges(alpha=0.65,scale=1.,panel_scaling = F,bandwidth=.02)+
+  ylab("")+
+  xlab("Cell type changes per colony")+
+  theme_minimal_hgrid()+
+  scale_fill_manual(values=coloring)+
+  scale_color_manual(values=myColors)+
+  theme(
+    axis.ticks =element_blank(),         # turn ticks back on
+    axis.text.y = element_blank() ,
+    axis.title.y = element_blank() # center text with tick
+  )
+```
+
+
+

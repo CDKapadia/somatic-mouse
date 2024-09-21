@@ -1,0 +1,243 @@
+---
+title: "Detection of shared hematopoetic mutations with colonic crypts"
+author: "Chiraag Kapadia, Nick Williams"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = './scripts/')
+```
+
+### Summary
+
+0.  Define functions.
+1.  Generate top-of-tree plots, as shown in Extended Data Fig. 3
+
+#### Library and support script dependencies
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+source("load_and_annotate_tree.R")
+source("trees.R")
+source("plotting_utils.R")
+
+```
+
+#### Import tree objects for analysis
+
+```{r}
+tree_list = readRDS("~/Desktop/somatic_mouse/tree_data/all_tree_list.rds")
+colon_list = readRDS("~/Desktop/somatic_mouse/tree_data/colon_list.rds")
+```
+
+### 0. Define functions
+
+```{r warning=FALSE}
+add_details_field=function(pdx,##<< PDX object or list including details matrix
+                 tree,
+                 node,
+                 control,
+                 ...
+){
+  
+  control=add_defaults(control,defaults=list(FIELD="COLON_FRAC",b.plot.bars=FALSE))
+  barcol=control$barcol
+  ##Get all the detail about the edge coords + idx in detail
+  info=get_edge_info(pdx,tree,node)
+  
+  if(length(info$idx)==0){
+    return(NULL)
+  }
+  
+  if(!is.null(control$filter.on)){
+    info$idx=info$idx[which(pdx$details[[control$filter.on]][info$idx])]
+    if(length(info$idx)==0){
+      return(NULL)
+    }
+  }
+  
+  
+  if(control$b.plot.bars){
+    plotF=plotBars
+  }else{
+    plotF=plotPie3
+  }
+  samples=control$samples
+  
+  df=pdx$details[info$idx,]
+  #df=df[which(df$dep>=control$min.depth),]
+  
+  df$vaf=df[[control$FIELD]]
+  df=df[which(!is.na(df$vaf)),]
+  N=dim(df)[1]
+  if(N==0){
+    return(df)
+  }
+  
+  
+  df=df[order(df$vaf),]
+  yd=info$yt-info$yb
+  
+  
+  if(N==1){
+    y=0.5*(info$yb+info$yt)
+    width=yd
+  }else{
+    y1=seq(info$yb,info$yt,length.out = N+2)
+    #Don't use the ends..
+    y=y1[2:(N+1)]
+    width=y[2]-y[1]
+  }
+  
+  if(!control$b.plot.bars){
+    r=0.4  ##
+  }else{
+    r=0.4
+  }
+  for(i in 1:N){
+    vaf=min(df$vaf[i],0.999)
+    if(is.na(vaf)){
+      plotF(x=info$x,y = y[i],radius=r,col=c("lightgray","lightgray"),prop=c(0,1),border="lightgray",width=width)
+    }else{
+      if(vaf<1e-6 && !control$b.plot.empty){
+        
+      }else{
+        plotF(x=info$x,y = y[i],radius = r,col=c(barcol,"white"),prop = c(vaf,1-vaf),width = width)
+      }
+    }
+  }
+  for(i in 1:N){
+    if(!is.null(df$label) && !is.na(df$label[i]) && nchar(df$label[i])>0){
+      text(x=info$x-r,y=y[i],labels = df$label[i],cex=control$cex.label,pos=2,offset=0)
+      points(x=info$x,y=y[i],pch=df$pch[i],col=df$col[i],bg=df$col[i])
+      #cat(df$label[i],":",df$vaf[i],": rank=",length(which(df$vaf[i]>df$vaf))/length(df$vaf),":",df$vaf,"\n")
+    }
+  }
+  df
+  
+}
+
+plot_details_field_tree=function(pdx,label,field,cex.label=1,b.plot.bars=FALSE,lwd=1,b.plot.empty=TRUE,...){
+  pdx$tree_ml$edge.length=data.frame(node=pdx$tree_ml$edge[,2]) %>% left_join(pdx$dat$details %>% group_by(node) %>% summarise(N=n())) %>% mutate(N=ifelse(is.na(N),0,N))  %>% pull(N)
+  pdx$dat$details[order(pdx$dat$details[[field]],decreasing = TRUE,na.last = TRUE),]
+  tree=plot_tree(pdx$tree_ml,cex.label = cex.label,mar=c(1,1,2,3)+0.1,...)
+  title(label)
+  ##mtext(label,side=3,xpd=TRUE)
+  control=list(b.plot.bars=b.plot.bars,FIELD=field,barcol="black",b.plot.empty=b.plot.empty)
+  #browser()
+  res=add_annotation(pdx$dat,tree,add_details_field,control=control)
+  ##tree=plot_labelled_tree(tree,pdx,style="classic",cex.annot.label=1,legpos="topleft")
+  return(tree)
+}
+
+plotPie3=function(x,y,radius,col,prop,llwd=0.5,border="black",width=1){
+  lims=par("usr")
+  #as=dev.size()
+  as=dev.size()/par("mfcol")[c(2,1)]
+  ## Correct for 
+  asr=as[1]/as[2]
+  yscale=asr*(lims[4]-lims[3])/(lims[2]-lims[1])
+  prop=prop/sum(prop)
+  cutpoint=c(0,cumsum(prop)*2*pi)
+  max.y.radius=width/2
+  if(radius*yscale>max.y.radius){
+    radius=max.y.radius/yscale
+  }
+  
+  N=2*pi/0.05
+  n=ceiling(N*diff(cutpoint)/(2*pi))
+  d=diff(cutpoint)/n
+  radius=lims[2]/75 #THIS IS WHERE TO FIDDLE
+  
+  if(prop[1]<1e-6){
+    i=3
+    polygon(x+c(radius*cos(seq(cutpoint[i-1],cutpoint[i],d[i-1]))),
+            y+yscale*c(radius*sin(seq(cutpoint[i-1],cutpoint[i],d[i-1]))),
+            border=border,col=col[i-1],lwd=llwd)
+    return(yscale)
+  }
+  if(length(prop)>1){
+    for(i in 2:length(cutpoint)){
+      polygon(x+c(radius*cos(seq(cutpoint[i-1],cutpoint[i],d[i-1])),0),
+              y+yscale*c(radius*sin(seq(cutpoint[i-1],cutpoint[i],d[i-1])),0),
+              border=border,col=col[i-1],lwd=llwd)
+    }
+  }else{
+    i=2
+    polygon(x+c(radius*cos(seq(cutpoint[i-1],cutpoint[i],d[i-1]))),
+            y+yscale*c(radius*sin(seq(cutpoint[i-1],cutpoint[i],d[i-1]))),
+            border=border,col=col[1],lwd=llwd)
+  }
+  yscale
+}
+```
+
+### 1. Map shared colonic variants to tree
+
+```{r message=FALSE, warning=FALSE}
+for(s in c("MD7180","MD7181","MD7182")){
+  PD2=colon_list[[paste0(s,"_ColonCrypts")]]
+  VAF_cutoff_across_all_colons=median(PD2$inf$snv$details$meanvaf_g[which(PD2$inf$snv$details$FILTER==0)])/1.9
+  
+  cgpvaf_paths = list.files(paste0(getwd(),"/../data/colon_cgpvaf_table/"),pattern=sprintf("%s.ANNOT.tsv",s),full.names = T,ignore.case=T)
+  normal_flt="MDGRCm38is"
+  samples_exclude=NULL
+  NR=NV=Muts=c()
+  for(n in 1:length(cgpvaf_paths)){
+    
+    data = fread(cgpvaf_paths[n],header=T,data.table=F)
+    Muts = c(Muts,paste(data$CHROM,data$POS,data$REF,data$ALT,sep="_"))
+    NR = rbind(NR,data[,grepl("DEP",colnames(data))&!grepl(paste(c(normal_flt,samples_exclude),collapse="|"),colnames(data))])
+    NV = rbind(NV,data[,grepl("MTR",colnames(data))&!grepl(paste(c(normal_flt,samples_exclude),collapse="|"),colnames(data))])
+  }
+  rownames(NV)=rownames(NR)=Muts
+  samples=colnames(NR)=colnames(NV)=gsub("_DEP","",colnames(NR))
+  
+  percryptvaf = NV/NR
+  
+  # Defining a "positive" crypt, accounting for depth differences.  
+  # If any crypt has a variant with the VAF cutoff, then consider any crypt with >= n reads as positive.
+  nreads=2
+
+  indexes_counts = apply(percryptvaf,MARGIN = 1,function(x){
+    any(x>VAF_cutoff_across_all_colons,na.rm = T)
+    })
+  counts=sapply(1:dim(percryptvaf)[1], FUN=function(i){
+    if(any(percryptvaf[i,]>VAF_cutoff_across_all_colons,na.rm = T) &
+       any(NV[i,]>2,na.rm = T) #require something tho have atleast 3 reads..
+       ){
+      return(sum(NV[i,]>=nreads))
+    }else{0}
+  })
+  names(counts)<-names(indexes_counts)
+ 
+  #for variants only seen in a single crypt, make a stronger vaf filter.. 
+  singleton_vaf_cutoff=median(rowSums(percryptvaf)[which(counts==1)])/2
+  changer=mapply(function(x,y){
+    if(y){return(0)}else{1}
+  }, x=counts[which(counts==1)],y=rowSums(percryptvaf)[which(counts==1)]<singleton_vaf_cutoff)
+  
+  counts[which(counts==1)]<-changer
+  COLON_FRAC=counts/length(samples)
+  
+  vars_df =as.data.frame(do.call(rbind,str_split(names(counts),"_")))
+  colnames(vars_df)<- c("Chrom","Pos","Ref","Alt")
+  vars_df$COLON_FRAC = COLON_FRAC
+  
+  PD2=tree_list[[s]]
+ 
+  PD2$pdx$dat$details <- merge(x=PD2$pdx$dat$details,y=vars_df, 
+           by=c("Chrom","Pos","Ref","Alt"),
+           all.x=TRUE)
+  PD2$pdx$dat$details$COLON_FRAC[which(is.na(PD2$pdx$dat$details$COLON_FRAC))]<-0
+
+
+  label=sprintf("%s; matched colon",s)
+  plot_details_field_tree(PD2$pdx,label=label,field="COLON_FRAC",ymax=12/1.05,b.plot.empty = F)
+  
+}
+```

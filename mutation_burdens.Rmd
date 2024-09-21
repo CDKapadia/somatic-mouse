@@ -1,0 +1,199 @@
+---
+title: "Mutation burden calculation from trees"
+author: "Chiraag Kapadia, Nick Williams"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = './scripts/')
+```
+
+### Summary
+##### 0. Define plotting function
+##### 1. Extract mutation burden counts for each colony from trees
+##### 2. Single Base Substitutions
+#####   a) HSCs, aged vs. young
+#####   b) MPPs, aged vs. young
+#####   c) HSC vs. MPP,
+##### 3. Insertions-deletions (very few per colony)
+#####   a) HSCs, aged vs. young
+#####   b) MPPs, aged vs. young
+#####   c) HSC vs. MPP
+  
+
+#### Library and support script dependencies
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(ggeffects)
+library(rstatix)
+library(lme4)
+source("load_and_annotate_tree.R")
+source("trees.R")
+source("plotting_utils.R")
+
+```
+
+#### Import tree objects for analysis, intialize necessary variables.
+
+```{r}
+tree_list = readRDS("~/Desktop/somatic_mouse/tree_data/all_tree_list.rds")
+```
+
+### 0. Define plotting functions
+```{r warning=FALSE}
+makeMutationBurdenPlot=function(datadir,indels=F,compartment=""){
+  setwd(datadir)
+  if(indels){compartment="_INDEL"}else{compartment="_SNV"}
+  a <- list.files(path = datadir, pattern = sprintf("*branchLengthCorrected%s.tsv",compartment))  %>% 
+    map_df(~fread(.))
+
+  ### HSC ###
+  b=a[a$burden>0,] #exclude root node.
+  b=b[!grepl("Colon|combined|MPP",b$SampleName), ] #HSC samples only.
+
+  b$Age = 0
+  b$Age[which(grepl("MD7180|MD7181|MD7182",b$SampleName))] <- 30
+  b$Age[which(grepl("MD7183|MD7184|MD7185",b$SampleName))] <- 3
+  
+  lmer1 =  lmer(burden ~ Age + (0 + Age |PDID), data = b,REML = F,
+                control = lmerControl(optimizer = "nmkbw"))
+  print(summary(lmer1))
+  
+  b <- b %>% 
+    mutate(fit.m = predict(lmer1, re.form = NA),
+           fit.c = predict(lmer1, re.form = NULL))
+  
+  pr=ggpredict(lmer1, "Age")
+  cat("\n")
+  cat("\n")
+  print(pr)
+  colnames(pr)[1]<-"Age"
+  b=merge(b, pr,by="Age")
+  
+  formula=y ~ x
+    p_hsc= ggplot(b, aes(x=Age, y=burden)) +ggtitle(sprintf("HSC %s mutation burden over time",compartment))+
+    geom_violin(aes(colour = factor(SampleName)), position = position_dodge(width = 5))+
+    geom_point(aes(colour = factor(SampleName)), position =  position_jitterdodge(dodge.width = 5,jitter.width=2, seed = 1))+
+    ylab("SNVs")+
+    xlab("Age (months)")+
+    guides(color=guide_legend(title="Sample"))+
+    scale_color_manual(name = sample,values = myColors)+
+    scale_y_continuous(breaks = seq(0, 300, len = 7))+
+    # geom_smooth(method = "lm",formula=formula)+
+    geom_line(aes(y = predicted), col = 1, size = 1) + # use the LME results
+    geom_ribbon( aes(y = NULL, ymin = conf.low, ymax = conf.high,
+                                         # color = NULL, fill = grp
+                     ),alpha = .15)+
+    # stat_regline_equation(
+    #   aes(label =  paste(..eq.label.., ..adj.rr.label.., sep = "~~~~")),
+    #   formula = formula)+
+    theme_minimal_hgrid()
+  plot(p_hsc)
+  
+  ##### MPP ######
+  b=a[a$burden>0,] 
+  b=b[grepl("MPP",b$SampleName), ]
+  b=b[!grepl("combined",b$SampleName), ]
+  
+  b$Age = 0
+  b$Age[which(grepl("MD7180|MD7181|MD7182",b$SampleName))] <- 30
+  b$Age[which(grepl("MD7183|MD7184|MD7185",b$SampleName))] <- 3
+  
+  formula=y ~ x
+  p_mpp=ggplot(b, aes(x=Age, y=burden)) +ggtitle(sprintf("MPP%s mutation burden over time",compartment))+geom_smooth(method = "lm",formula=formula)+
+    geom_violin(aes(colour = factor(SampleName)), position = position_dodge(width = 5))+
+    geom_point(aes(colour = factor(SampleName)), position =  position_jitterdodge(dodge.width = 5,jitter.width=2, seed = 1))+
+    ylab("SNVs")+
+    xlab("Age (months)")+
+    guides(color=guide_legend(title="Sample"))+
+    scale_y_continuous(breaks = seq(0, 300, len = 7))+
+    stat_regline_equation(
+      aes(label =  paste(..eq.label.., ..adj.rr.label.., sep = "~~~~")),
+      formula = formula
+    ) +
+    scale_color_manual(name = sample,values = myColors)+
+    theme_minimal_hgrid()
+  plot(p_mpp)
+  
+  ########### HSC vs MPP comparison
+  b=a[a$burden>0,]
+  b=b[which(!grepl("Colon|combined",b$SampleName)), ]
+  
+  b$Age = 0
+  b$Age[which(grepl("MD7180|MD7181|MD7182",b$SampleName))] <- 30
+  b$Age[which(grepl("MD7183|MD7184|MD7185",b$SampleName))] <- 3
+  
+  b$Differentiation = "HSC"
+  b$Differentiation[which(grepl("MPP",b$SampleName))] <- "MPP"
+  
+  p_hscvmpp=ggplot(b, aes(x=Differentiation, y=burden)) +
+    geom_violin(aes(colour = factor(SampleName)), position = position_dodge(width = 5))+
+    geom_point(aes(colour = factor(SampleName)), position =  position_jitterdodge(dodge.width = 5,jitter.width=2, seed = 1),size=0.5)+
+    # geom_point(aes(colour = factor(SampleName)))+
+    facet_grid(~factor(PDID,levels = c("MD7183","MD7184","MD7185", "MD7180","MD7181","MD7182")), 
+               scales = "free_x", # Let the x axis vary across facets.
+               space = "free_x",  # Let the width of facets vary and force all bars to have the same width.
+               switch = "x")  +
+    ylab("SNVs")+
+    xlab(NULL)+
+    guides(NULL)+
+    scale_color_manual(name = sample,values = myColors)+
+    scale_y_continuous(breaks = seq(0, 300, len = 7))+
+    stat_summary(aes(color=factor(SampleName)),fun.y = median, fun.ymin = median, fun.ymax = median,
+                 geom = "crossbar", width = 1,show.legend = F)+
+    theme_minimal_hgrid()+
+    theme(panel.spacing = unit(0, "lines"),legend.position = "none")
+  
+     #Calculate adjusted p-values
+  if(indels==F){
+  stat.test <- b %>%  group_by(PDID) %>%   t_test(burden ~ Differentiation) %>%   adjust_pvalue(method = "bonferroni") %>%   add_significance()  %>%  add_xy_position(x = "Differentiation")
+     p_hscvmpp= p_hscvmpp+stat_pvalue_manual(stat.test, label = "p={p.adj}")
+  }
+  
+  plot(p_hscvmpp)
+}
+```
+
+### 1. Extract mutation burden counts for each colony from trees
+```{r}
+samples_hsc <- c("MD7180","MD7181","MD7182","MD7183","MD7184","MD7185")
+samples_mpp <- c("MD7181_MPP", "MD7182_MPP", "MD7184_MPP", "MD7185_MPP","MD7180_MPP","MD7183_MPP")
+
+for(s in c(samples_hsc,samples_mpp)){
+  PD2=tree_list[[s]]
+
+  tips=setdiff(PD2$pdx$tree_ml$tip.label,"zeros")
+  nh=nodeHeights(PD2$pdx$tree_ml)
+  ddf=data.frame(depth=colMeans(PD2$pdx$dat$dep[,tips]),burden=nh[match(match(tips,PD2$pdx$tree_ml$tip.label),PD2$pdx$tree_ml$edge[,2]),2])
+  ddf$SampleName=s
+  ddf$PDID=str_split(s,"_")[[1]][1]
+  ddf$sample <- row.names(ddf)
+  
+  tree=PD2$pdx$tree_ml
+  tree$edge.length=sapply(tree$edge[,2],function(x) with(PD2$pdx$dat$details,length(which(node==x & TYPE=="INDEL"))))
+  nh=nodeHeights(tree)
+  burden=data.frame(sample=tree$tip.label,burden=nh[match(1:length(tree$tip.label),tree$edge[,2]),2])
+  burden$SampleName=s
+  burden$PDID=str_split(s,"_")[[1]][1]
+
+  write_tsv(ddf,paste0(getwd(),"/../output/",s,"_branchLengthCorrected_","SNV",".tsv")) #See here for raw per-tree output.
+  write_tsv(burden,paste0(getwd(),"/../output/",s,"_branchLengthCorrected_","INDEL",".tsv")) #See here for raw per-tree output.
+}
+```
+
+### 2. Single-base-substitutions
+```{r warning=FALSE}
+makeMutationBurdenPlot(paste0(getwd(),"/../output/"),indels=F)
+```
+
+### 3. Indels
+```{r warning=FALSE}
+makeMutationBurdenPlot(paste0(getwd(),"/../output/"),indels=T)
+```
+
+

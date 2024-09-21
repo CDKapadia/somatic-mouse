@@ -1,0 +1,151 @@
+---
+title: "Tree complexity (shannon diversity)"
+author: "Chiraag Kapadia"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = './scripts/')
+```
+
+### Summary
+
+Calculate shannon diversity index for mouse trees and human HSPC trees from Mitchell et al.
+Human trees are copied from published code associated with Mitchell et al., available at: https://github.com/emily-mitchell/normal_haematopoiesis/tree/main/8_driver_modelling/input
+
+Ages are normalized accordingly to median lifespan, derived as described in Supplementary Note 1. 
+
+#### Library and support script dependencies
+
+```{r message=FALSE, warning=FALSE}
+library(parallel)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(phylobase)
+library(phangorn)
+source("load_and_annotate_tree.R")
+source("trees.R")
+source("plotting_utils.R")
+```
+
+#### Import tree objects for analysis
+
+```{r}
+tree_list = readRDS("~/Desktop/somatic_mouse/tree_data/all_tree_list.rds")
+```
+
+#### Support function for calculating shannon diversity.
+```{r}
+shannonDiversityFromTree = function(PD2="",resdir,cutoff,tree=NULL,seed=2024){
+  set.seed(seed)
+  if(is.null(tree)){
+  tree=PD2$pdx$tree_ml
+  }
+  #downsample to correct for different sized trees (ie normalize 400 colonies vs. 150 colony trees)
+  tree=as(subset(as(tree,"phylo4"),tips.include=sample(tree$tip.label,50)),"phylo") 
+  tree<- drop.tip(tree,"zeros") #drop zero out branch.
+  
+  
+  whichNodesBelowCutoff = nodeHeights(tree)[,1]>cutoff
+  nodes=unique(tree$edge[,1][whichNodesBelowCutoff])
+  pp=Descendants(tree,nodes,"tips")  
+  uniquesizes=unique(sort(unlist(lapply(pp,length)),decreasing = T))
+  if(length(nodes)==0){uniquesizes=c(1)}
+  # Ensure that colonies are only calculated based on represented in the largest clade beyond cutoff.
+  # ie that a colony is not assessed as part for >1 clade. 
+  # This is required for the shannon diversity formula.
+  seen=c()
+  sizer=c()
+  for(i in max(uniquesizes):1){
+    if(length(nodes)==0){next}
+    for(k in 1:length(pp)){
+      if(length(pp[k])<i){
+      }else{
+        colonies=tree$tip.label[unlist(pp[k])]
+        
+        if(length(intersect(colonies,seen))<1){
+          seen=c(seen,colonies)
+          sizer=c(sizer,length(colonies))
+        }else{
+        }}
+    }  
+  }
+  
+  setdiff(tree$tip.label,seen)
+  fillin=rep(1,length(  setdiff(tree$tip.label,seen) ))
+  counts = c(sizer,fillin)
+  proportions= counts/ length(tree$tip.label)
+  
+  shannon_diversity_index = -1*sum(unlist(lapply(proportions, function(x){x*log(x)})))
+  shannon_diversity_index
+}
+```
+
+#### Calculate shannon diversity for all trees
+```{r warning=FALSE}
+#Initialize necessary variables 
+samples_hsc <- c("MD7180","MD7181","MD7182","MD7183","MD7184","MD7185")
+samples_mpp <- c("MD7181_MPP", "MD7182_MPP", "MD7184_MPP", "MD7185_MPP","MD7180_MPP","MD7183_MPP")
+samples=c(samples_hsc,samples_mpp)
+PDD=tree_list[samples]
+
+human50lifespan=(83.5) #years, see Supp Note 1
+mouse50lifespan=28. #months, see Supp Note 1
+cutoff=50
+seed=1
+
+#Mouse
+shannon <- lapply(PDD,FUN=shannonDiversityFromTree,resdir=resdir,cutoff=cutoff,seed=seed)
+
+#Human, for comparison
+treefiles=list.files(path="../data/mitchell_trees/",full.names = T)
+ages=c(63,29,38,81,77,75,76,48) #years
+humans_tree_shannon<-lapply(treefiles,function(x){
+  tr=read.tree(x)
+  shannonDiversityFromTree(resdir=resdir,cutoff=cutoff,tree = tr,seed=seed)
+})
+
+
+```
+
+
+#### Plot
+
+```{r}
+#Wrangle into appropriate data frame
+df_pd<-data.frame(sample=samples,shannon=unlist(shannon))
+df_pd$age=-1;df_pd$compartment="";
+df_pd$age[which(grepl("80|81|82",df_pd$sample))]<-30
+df_pd$age[which(grepl("83|84|85",df_pd$sample))]<-3
+df_pd$compartment[which(grepl("MPP",df_pd$sample))]<-"MPP"
+df_pd$compartment[which(!grepl("MPP",df_pd$sample))]<-"HSC"
+df_pd$PDID<- substr(df_pd$sample,1,6)
+
+df_pd_human_shannon<-data.frame(sample=str_split(treefiles,pattern="tree|_",simplify = T)[,5],#Mind the path subset.
+                                shannon=unlist(humans_tree_shannon),
+                                age=ages)
+
+#Normalize to lifespan
+df_pd$age = df_pd$age/mouse50lifespan;  
+df_pd_human_shannon$age=df_pd_human_shannon$age/human50lifespan 
+
+#Now plot
+ ggplot(bind_rows(df_pd_human_shannon,df_pd,), aes(x=age,y=shannon,group=compartment))+
+  geom_point(aes(color = sample), size=3,position = position_dodge(width=0), stat = "identity")+
+  ylab("Shannon Diversity")+
+  guides(color=guide_legend(title=""))+
+  scale_color_manual(values = myColors)+
+  scale_x_continuous(breaks = seq(0,1,.2))+
+  scale_y_continuous(breaks = seq(2.6, 4, len = 8),limits = c(2.6,4))+
+  xlab("Normalized Lifespan (Percentile)")+
+  labs(colour = "Sample")+
+  theme_minimal_hgrid()+
+  theme(legend.position = "none")
+
+```
+
+
+

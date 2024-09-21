@@ -1,0 +1,113 @@
+---
+title: "dN/dS analysis for mouse tree variants"
+author: "Chiraag Kapadia"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = './scripts/')
+```
+
+#### Library and support script dependencies
+
+```{r message=FALSE, warning=FALSE}
+library(dndscv)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+source("load_and_annotate_tree.R")
+source("trees.R")
+
+```
+
+#### Import tree objects for analysis
+
+```{r}
+tree_list = readRDS("~/Desktop/somatic_mouse/tree_data/all_tree_list.rds")
+```
+
+#### Define function to extract mutations from input trees and do dnds analysis
+
+```{r}
+do_dnds_mouse=function(PDD){
+  muts<<-do.call("rbind",lapply(PDD,function(PD) {
+    sample=sprintf("%s_%s",PD$patient,PD$pdx$dat$details$node)
+    out=PD$pdx$dat$details[,c("Chrom","Pos","Ref","Alt")]
+    out$sampleID=sample
+    fields=c("VC")
+    out=cbind(out,PD$pdx$dat$details[,fields])
+    colnames(out)=c("chr","pos","ref","mut","sampleID",fields)
+    tree=PD$pdx$tree_ml
+    nh=nodeHeights(tree)
+    heights_by_node=data.frame(tree$edge[,2],nh[,2])
+    targetNodes = heights_by_node[which(heights_by_node[,2] > -1 ),1] #everything
+    mutations_supporting_node <- which(is.element(PD$pdx$dat$details$node,targetNodes))
+    out[mutations_supporting_node,c("sampleID",fields,"chr","pos","ref","mut")]
+  }  )  )
+  dndsout=dndscv(muts %>% mutate(alt=mut) %>% (function(x) x[,c("sampleID","chr","pos","ref","alt")]), 
+         refdb = "~/mm10_refcds.rda", max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf)
+}
+```
+
+#### dn/ds on aged and young cohorts
+
+```{r message=FALSE, warning=FALSE}
+samples_aged <- c("MD7180_combined_HSC_MPP","MD7181_combined_HSC_MPP","MD7182_combined_HSC_MPP")
+samples_young <- c("MD7183_combined_HSC_MPP","MD7184_combined_HSC_MPP","MD7185_combined_HSC_MPP")
+
+  dndsout_old = do_dnds_mouse(tree_list[samples_aged]); print(dndsout_old$globaldnds)
+  dndsout_young = do_dnds_mouse(tree_list[samples_young]); print(dndsout_young$globaldnds)
+  
+  global_old = dndsout_old$globaldnds
+  global_old$sample = paste0("Aged",", theta=",round(dndsout_old$nbreg$theta,1))
+  global_old$theta = dndsout_old$nbreg$theta
+
+
+  global_young = dndsout_young$globaldnds
+  global_young$sample = paste0("Young",", theta=",round(dndsout_young$nbreg$theta,1))
+  global_young$theta = dndsout_young$nbreg$theta
+  
+  
+  global_merged <<- rbind(global_old,global_young)
+```
+
+#### Plot the difference in dN/dS likelihood estimates
+
+```{r pressure, echo=FALSE}
+global_merged$name <- recode(global_merged$name, wall = 'All',
+                              wmis = 'Missense',
+                              wnon = 'Nonsense',
+                              wspl = 'Splice',
+                              wtru = "Truncating")
+# df[which(df$sample=="Aged, theta=0.4" & df$name=="Splice" &df$sample=="Truncating"),]
+ggplot(global_merged, aes(y = name, x = mle, color=sample)) +
+  geom_point(shape = 18, size = 5,position = position_dodge(width = -0.5)) +
+  geom_errorbarh(aes(xmin = cilow, xmax = cihigh), height = 0.25,position = position_dodge(width = -0.5)) +
+  geom_vline(xintercept = 1, color = "red", linetype = "dashed", cex = 1, alpha = 0.5) +
+  xlab("dN/dS") + 
+  ylab(" ") + 
+  coord_cartesian(xlim = c(0, 4))+ 
+  theme_half_open() +
+  scale_y_discrete(limits = rev(c("All", "Missense", "Nonsense", "Splice", "Truncating")))+
+  # scale_color_discrete(breaks=samples)+
+  theme(panel.border = element_blank(),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.text.y = element_text(size = 12, colour = "black"),
+        axis.text.x.bottom = element_text(size = 12, colour = "black"),
+        axis.title.x = element_text(size = 12, colour = "black"),
+        legend.position = "none")+
+  scale_color_manual(values =  c("#882255", "#332288"))
+```
+
+#### Report dN/dS for entire pooled callset.
+
+```{r}
+dndsout= do_dnds_mouse(tree_list[c(samples_young,samples_aged)])
+print(dndsout$globaldnds)
+```
